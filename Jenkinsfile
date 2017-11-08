@@ -56,10 +56,18 @@ def backup(container) {
     volumes.each {
       incontainer container, {
 	if ( sh( returnStatus: true, script: "test -d '${it}'" ) == 0 ) {
-	  echo "Backing up ${it}"
+	  echo "Purging up ${it}"
 	  duplicity(backupName, it, "remove-older-than ${MAX_AGE} --force")
 	  duplicity(backupName, it, "remove-all-inc-of-but-n-full ${KEEP_INC} --force")
 	  duplicity(backupName, it, "cleanup --force")
+
+	  echo "Collecting backup status"
+
+	  volumetext=it.replaceAll('[^a-zA-Z0-9_]', '_')
+	  
+          sh "duplicity collection-status --s3-use-new-style s3+http://${env.BUCKET}/${PREFIX}/${backupName}${it} > ${backupName}-${volumetext}-summary.txt"
+	  archive "${backupName}-${volumetext}-summary.txt"
+
 	}
        }
      }
