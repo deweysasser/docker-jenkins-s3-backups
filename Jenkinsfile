@@ -131,7 +131,7 @@ def getenv(name, defaultValue) {
  */
 
 def incontainer(container, body) {
-      docker.image("wernight/duplicity").inside("--volumes-from ${container} --hostname autobackup") {
+      docker.image("wernight/duplicity").inside("--volumes-from ${container} -v duplicity-cache:/home/duplicity/.cache/duplicity -v duplicity-gnupg:/home/duplicity/.gnupg --hostname autobackup") {
        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
 				credentialsId: CREDENTIALS_ID, 
 	     			accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
