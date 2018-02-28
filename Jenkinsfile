@@ -20,7 +20,7 @@ try {
       containers = sh( returnStdout:true, script:"docker ps -f label=auto.backup --format {{.Names}}").trim().split('\n')
 
       containers.each {
-         backup(it.trim())
+         duplicityBackup(it.trim())
       }
     }
   }
@@ -34,7 +34,7 @@ catch(exc) {
   }
 }
 
-def backup(container) {
+def duplicityBackup(container) {
 
   echo "Looking up backup name"
   backupName = sh(returnStdout:true, script:"docker ps -f name=${container} --format '{{.Label \"auto.backup\"}}'").trim()
@@ -43,7 +43,7 @@ def backup(container) {
 
   stage("Backup\n${backupName}") {
     volumes.each {
-      incontainer container, {
+      inDuplicity container, {
 	if ( sh( returnStatus: true, script: "test -d '${it}'" ) == 0 ) {
 	  echo "Backing up ${it}"
 	  duplicity(backupName, it)
@@ -54,7 +54,7 @@ def backup(container) {
 
   stage("Purge old\n${backupName}") {
     volumes.each {
-      incontainer container, {
+      inDuplicity container, {
 	if ( sh( returnStatus: true, script: "test -d '${it}'" ) == 0 ) {
 	  echo "Purging up ${it}"
 	  duplicity(backupName, it, "remove-older-than ${MAX_AGE} --force")
@@ -130,7 +130,7 @@ def getenv(name, defaultValue) {
  * from CONTAINER mapped in.
  */
 
-def incontainer(container, body) {
+def inDuplicity(container, body) {
       docker.image("wernight/duplicity").inside("--volumes-from ${container} -v duplicity-cache:/home/duplicity/.cache/duplicity -v duplicity-gnupg:/home/duplicity/.gnupg --hostname autobackup") {
        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
 				credentialsId: CREDENTIALS_ID, 
@@ -140,4 +140,19 @@ def incontainer(container, body) {
 	 }
        }
      }
+
+/** Run the given BODY inside in a restic container with volumes
+ * from CONTAINER mapped in.
+ */
+
+def inRestic(container, body) {
+    docker.image("restic/restic").inside("--volumes-from ${container} --hostname autobackup") {
+        withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
+			  credentialsId: CREDENTIALS_ID, 
+	     		  accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
+			  secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+   	    body()
+	}
+    }
+}
 
