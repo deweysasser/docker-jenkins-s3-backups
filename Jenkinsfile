@@ -5,9 +5,10 @@
 MAX_AGE=getenv("MAX_AGE", "1M")
 KEEP_INC=getenv("KEEP_INC", "2")
 FULLAGE=getenv("FULL_AGE", "7D")
-PREFIX=getenv("PREFIX", "autobackup")
+PREFIX=getenv("PREFIX", "autobackup/restic")
 LABEL=getenv("LABEL", "autobackup")
 CREDENTIALS_ID=getenv("CREDENTIALS_ID", "techops")
+BACKUP_PASSWORD=getenv("BACKUP_PASSWORD", "backup")
 // parameter NODES is used to find the nodes on which to run.  if
 // NODES is not defined it will introspect all nodes with label LABEL
 
@@ -20,7 +21,7 @@ try {
       containers = sh( returnStdout:true, script:"docker ps -f label=auto.backup --format {{.Names}}").trim().split('\n')
 
       containers.each {
-         duplicityBackup(it.trim())
+         resticBackup(it.trim())
       }
     }
   }
@@ -74,6 +75,36 @@ def duplicityBackup(container) {
    }
 }
 
+def resticBackup(container) {
+
+    echo "Looking up backup name"
+    backupName = sh(returnStdout:true, script:"docker ps -f name=${container} --format '{{.Label \"auto.backup\"}}'").trim()
+    sh "rm -f *.txt"
+
+    volumes = getVolumesFrom(container)
+    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
+		      credentialsId: CREDENTIALS_ID, 
+	     	      accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
+		      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+
+        targets=volumes.join(" ")
+
+        stage("Backup\n${backupName}") {
+            echo "Backing up ${backupName}:${it}"
+            restic backupName, container, "init", true
+            restic backupName, container, "backup ${targets} >${backupName}-backup.txt"
+        }
+
+        stage("Purge old\n${backupName}") {
+	    echo "Purging old ${backupName}"
+            restic backupName, container, "snapshots > ${backupName}-snapshots.txt"
+            restic backupName, container, "forget --prune -d 7 -w 2 -m 6 -y 7 > ${backupName}-forget.txt"
+        }
+        
+	archive "*.txt"
+    }
+}
+
 def getVolumesFrom(container) {
   echo "Finding volumes in ${container}"
   volumeList = sh(returnStdout:true, script:"docker ps -f name=${container} --format '{{.Label \"auto.backup.volumes\"}}'").trim()
@@ -85,6 +116,23 @@ def getVolumesFrom(container) {
     volumes = volumeList.split(' ')
   }
   volumes
+}
+
+def restic(backupName, container, text, status=false) {
+    cmd= """docker run \
+          --hostname autobackup \
+          --rm \
+          --volumes-from ${container} \
+          -e 'TERM=
+          -e 'RESTIC_PASSWORD=${BACKUP_PASSWORD}' \
+          -e 'AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}' \
+          -e 'AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}' \
+          -e 'RESTIC_REPOSITORY=s3:s3.amazonaws.com/${env.BUCKET}/${PREFIX}/${backupName}' \
+restic/restic \
+${text}
+"""
+//    echo "Running [${cmd}]"
+    sh( returnStatus: status, script: cmd)
 }
 
 def duplicity(backupName, volume, op="") {
