@@ -16,15 +16,27 @@ BACKUP_PASSWORD=getenv("BACKUP_PASSWORD", "backup")
 nodes = nodesForLabel(LABEL)
 
 try {
-  nodes.each {
-    node(it) {
-      containers = sh( returnStdout:true, script:"docker ps -f label=auto.backup --format {{.Names}}").trim().split('\n')
+    nodes.each {
+        node(it) {
+            containers = sh( returnStdout:true, script:"docker ps -f label=auto.backup --format {{.Names}}").trim().split('\n')
 
-      containers.each {
-         resticBackup(it.trim())
-      }
+            echo "Containers are: ${containers}"
+            
+            containers.each {
+                container= it.trim()
+                echo "Checking ${container} for MYSQL password"
+                mysql_pass = sh(returnStdout:true, script:"docker inspect --format '{{.Config.Env}}' ${container} |  tr ' ' '\n' | grep MYSQL_ROOT_PASSWORD | sed 's/^.*=//'").trim()
+
+                if (mysql_pass != "") {
+                    // It must be mysql, so back it up that way
+                    resticBackupMysql(it.trim(), mysql_pass)
+                }
+                else {
+                    resticBackup(it.trim())
+                }
+            }
+        }
     }
-  }
 }
 catch(exc) {
   if (env.NOTIFY) {
@@ -105,6 +117,53 @@ def resticBackup(container) {
     }
 }
 
+def resticBackupMysql(container, password) {
+
+    echo "Looking up backup name"
+    backupName = sh(returnStdout:true, script:"docker ps -f name=${container} --format '{{.Label \"auto.backup\"}}'").trim()
+    sh "rm -f *.txt"
+
+    databases = getDatabasesFrom(container, password)
+    withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', 
+		      credentialsId: CREDENTIALS_ID, 
+	     	      accessKeyVariable: 'AWS_ACCESS_KEY_ID', 
+		      secretKeyVariable: 'AWS_SECRET_ACCESS_KEY']]) {
+
+
+        databases.each {
+
+            stage("Backup DB\n${backupName} ${it}") {
+                echo "Backing up ${backupName}:${it}"
+                restic backupName, container, "init", true
+                dumpToRestic backupName, container, it, password
+            }
+        }
+
+        stage("Purge old\n${backupName}") {
+	    echo "Purging old ${backupName}"
+            restic backupName, container, "snapshots > ${backupName}-snapshots.txt"
+            restic backupName, container, "forget --prune -d 7 -w 2 -m 6 -y 7 > ${backupName}-forget.txt"
+        }
+        
+	archive "*.txt"
+    }
+}
+
+def getDatabasesFrom(container, password) {
+    echo "Finding databases in ${container}"
+    dbList = sh(returnStdout:true, script:"docker ps -f name=${container} --format '{{.Label \"auto.backup.databases\"}}'").trim()
+
+    if ( dbList == "") {
+        databases = sh(returnStdout:true, script:"echo 'show databases;' | docker exec -i ${container} mysql -u root -p${password} | egrep -v 'Database|mysql|information_schema|performance_schema|sys'").split('\n')
+    }
+    else {
+        databases = dbList.split(' ')
+    }
+    echo "Databases are: ${databases}"
+    databases
+}
+
+
 def getVolumesFrom(container) {
   echo "Finding volumes in ${container}"
   volumeList = sh(returnStdout:true, script:"docker ps -f name=${container} --format '{{.Label \"auto.backup.volumes\"}}'").trim()
@@ -123,7 +182,6 @@ def restic(backupName, container, text, status=false) {
           --hostname autobackup \
           --rm \
           --volumes-from ${container} \
-          -e 'TERM=
           -e 'RESTIC_PASSWORD=${BACKUP_PASSWORD}' \
           -e 'AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}' \
           -e 'AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}' \
@@ -131,9 +189,27 @@ def restic(backupName, container, text, status=false) {
 restic/restic \
 ${text}
 """
-//    echo "Running [${cmd}]"
+    echo "Running [${cmd}]"
     sh( returnStatus: status, script: cmd)
 }
+
+def dumpToRestic(backupName, container, database, password, status=false) {
+    cmd= """ \
+docker exec $container mysqldump -u root -p${password} ${database} | \
+docker run -i \
+          --hostname autobackup \
+          --rm \
+          -e 'RESTIC_PASSWORD=${BACKUP_PASSWORD}' \
+          -e 'AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}' \
+          -e 'AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}' \
+          -e 'RESTIC_REPOSITORY=s3:s3.amazonaws.com/${env.BUCKET}/${PREFIX}/${backupName}' \
+restic/restic \
+backup --stdin --stdin-filename ${database}.sql 
+"""
+    echo "Running [${cmd}]"
+    sh( returnStatus: status, script: cmd)
+}
+
 
 def duplicity(backupName, volume, op="") {
     if (op == "") {
