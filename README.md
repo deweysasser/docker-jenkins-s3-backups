@@ -1,3 +1,14 @@
+ARCHIVED
+========
+
+This project is no longer maintained.  I now prefer [restic](https://restic.net/) as a backup solution.
+
+If someone would like to adopt it I'll be happy to transfer it.
+
+---
+
+
+
 Docker-Jenkins-S3 Backups
 =========================
 
